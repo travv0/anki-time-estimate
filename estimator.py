@@ -392,8 +392,17 @@ class FsrsTimeEstimator:
             f"[deck] {deck_name} simulation new={sim_new} review={sim_review}"
         )
 
-        exposures_per_new = self._new_exposures_per_card(sim_new, new_limit, new_conf)
-        exposures_per_review = self._review_exposures_per_card(sim_review, review_limit)
+        exposures_per_new = self._new_exposures_per_card(
+            sim_new=sim_new,
+            new_due=new_due,
+            new_limit=new_limit,
+            new_conf=new_conf,
+        )
+        exposures_per_review = self._review_exposures_per_card(
+            sim_review=sim_review,
+            review_due=review_due,
+            review_limit=review_limit,
+        )
 
         new_exposures = new_due * exposures_per_new
         review_exposures = review_due * exposures_per_review
@@ -435,10 +444,14 @@ class FsrsTimeEstimator:
         return total
 
     def _new_exposures_per_card(
-        self, sim_new: float, new_limit: int, new_conf: dict
+        self,
+        sim_new: float,
+        new_due: float,
+        new_limit: int,
+        new_conf: dict,
     ) -> float:
-        if new_limit > 0 and sim_new > 0:
-            ratio = sim_new / new_limit
+        if new_due > 0 and sim_new > 0:
+            ratio = sim_new / new_due
             if ratio > 0:
                 return ratio
         delays = new_conf.get("delays", [])
@@ -446,10 +459,12 @@ class FsrsTimeEstimator:
         return float(max(1, steps + 1))
 
     @staticmethod
-    def _review_exposures_per_card(sim_review: float, review_limit: int) -> float:
-        if review_limit > 0 and sim_review > 0:
-            ratio = sim_review / review_limit
-            if ratio >= 1:
+    def _review_exposures_per_card(
+        sim_review: float, review_due: float, review_limit: int
+    ) -> float:
+        if review_due > 0 and sim_review > 0:
+            ratio = sim_review / review_due
+            if ratio > 0:
                 return ratio
         return 1.0
 
