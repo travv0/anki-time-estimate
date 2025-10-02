@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sublime-project
+*.sublime-workspace
+.idea/
+.vscode/
+.eggs/
+*.egg-info/
+.DS_Store
+Thumbs.db
+config.json
