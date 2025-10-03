@@ -53,6 +53,7 @@ class AverageDurations:
 @dataclass
 class Contribution:
     name: str
+    owner_id: int
     new_capacity: float
     learn_count: float
     interday_count: float
@@ -169,10 +170,21 @@ class FsrsTimeEstimator:
             review_seconds=review_time,
         )
 
-    def _collect_contributions(self, deck_node) -> List[Contribution]:
-        deck_id = deck_node.deck_id
+    def _collect_contributions(
+        self,
+        deck_node,
+        root_deck_id: int | None = None,
+        top_level_id: int | None = None,
+    ) -> List[Contribution]:
+        deck_id = DeckId(deck_node.deck_id)
         deck = self.col.decks.get(deck_id, default=False) or {}
         deck_name = self._deck_name(deck_node, deck_id)
+
+        current_id = int(deck_id)
+        if root_deck_id is None:
+            root_deck_id = current_id
+        if top_level_id is None:
+            top_level_id = root_deck_id
 
         child_nodes = list(getattr(deck_node, "children", []))
         contributions: List[Contribution] = []
@@ -182,7 +194,18 @@ class FsrsTimeEstimator:
         child_review = 0.0
         child_interday = 0.0
         for child in child_nodes:
-            contributions.extend(self._collect_contributions(child))
+            child_id = int(getattr(child, "deck_id", 0))
+            if current_id == root_deck_id:
+                next_top_level = child_id
+            else:
+                next_top_level = top_level_id
+            contributions.extend(
+                self._collect_contributions(
+                    child,
+                    root_deck_id=root_deck_id,
+                    top_level_id=next_top_level,
+                )
+            )
             child_new += child.new_count
             child_learn += child.learn_count
             child_review += child.review_count
@@ -197,6 +220,11 @@ class FsrsTimeEstimator:
             getattr(deck_node, "interday_learning", getattr(deck_node, "interday_learning_uncapped", 0.0))
         )
         direct_interday = max(node_interday - child_interday, 0.0)
+
+        if current_id == root_deck_id:
+            owner_id = root_deck_id
+        else:
+            owner_id = top_level_id if top_level_id is not None else current_id
 
         if direct_new or direct_learn or direct_review or direct_interday:
             config_proto, config_dict = self._fetch_config(deck_id, deck_name)
@@ -237,6 +265,7 @@ class FsrsTimeEstimator:
             contributions.append(
                 Contribution(
                     name=deck_name,
+                    owner_id=owner_id,
                     new_capacity=direct_new,
                     learn_count=direct_learn,
                     interday_count=direct_interday,
@@ -256,60 +285,151 @@ class FsrsTimeEstimator:
         if not contributions:
             return 0.0, 0.0, 0.0
 
-        new_total = deck_node.new_count
-        learn_total = deck_node.learn_count
-        review_total = deck_node.review_count
-        interday_total = float(
-            getattr(deck_node, "interday_learning", getattr(deck_node, "interday_learning_uncapped", 0.0))
-        )
-
-        total_new_capacity = sum(c.new_capacity for c in contributions)
-        total_learn = sum(c.learn_count for c in contributions)
-        total_interday = sum(c.interday_count for c in contributions)
-        total_review_capacity = sum(c.review_capacity for c in contributions)
-
-        if self.debug:
-            self._log(
-                f"[deck] {deck_name} aggregate totals new={new_total} "
-                f"learn={learn_total} review={review_total} interday={interday_total}"
-            )
-
-        new_ratio = new_total / total_new_capacity if total_new_capacity else 0.0
-        review_ratio = review_total / total_review_capacity if total_review_capacity else 0.0
-        learn_ratio = learn_total / total_learn if total_learn else 0.0
-        interday_ratio = (
-            interday_total / total_interday if total_interday else 0.0
-        )
-
-        new_ratio = min(new_ratio, 1.0) if new_ratio else 0.0
-        review_ratio = min(review_ratio, 1.0) if review_ratio else 0.0
-        learn_ratio = min(learn_ratio, 1.0) if learn_ratio else 0.0
-        interday_ratio = min(interday_ratio, 1.0) if interday_ratio else 0.0
-
         new_time = 0.0
         learn_time = 0.0
         review_time = 0.0
 
-        for contrib in contributions:
-            new_alloc = contrib.new_capacity * new_ratio
-            review_alloc = contrib.review_capacity * review_ratio
-            learn_alloc = contrib.learn_count * learn_ratio
-            interday_alloc = contrib.interday_count * interday_ratio
-
-            new_time += new_alloc * contrib.new_exposure_per_card * contrib.avg_new_seconds
-            learn_time += (learn_alloc + interday_alloc) * contrib.avg_new_seconds
-            review_time += (
-                review_alloc
-                * contrib.review_exposure_per_card
-                * contrib.avg_review_seconds
+        child_targets: dict[int, tuple[float, float, float, float]] = {}
+        for child in getattr(deck_node, "children", []) or []:
+            interday_child = float(
+                getattr(child, "interday_learning", getattr(child, "interday_learning_uncapped", 0.0))
             )
+            child_targets[int(getattr(child, "deck_id", 0))] = (
+                float(child.new_count),
+                float(child.learn_count),
+                float(child.review_count),
+                interday_child,
+            )
+
+        grouped: dict[int, list[Contribution]] = {}
+        for contrib in contributions:
+            grouped.setdefault(int(contrib.owner_id), []).append(contrib)
+
+        interday_total = float(
+            getattr(deck_node, "interday_learning", getattr(deck_node, "interday_learning_uncapped", 0.0))
+        )
+
+        group_totals: dict[int, tuple[float, float, float, float]] = {}
+        for owner_id, items in grouped.items():
+            group_totals[owner_id] = (
+                sum(c.new_capacity for c in items),
+                sum(c.learn_count for c in items),
+                sum(c.interday_count for c in items),
+                sum(c.review_capacity for c in items),
+            )
+
+        child_ids = set(child_targets.keys())
+        direct_ids = [owner_id for owner_id in group_totals if owner_id not in child_ids]
+
+        new_total = float(deck_node.new_count)
+        learn_total = float(deck_node.learn_count)
+        review_total = float(deck_node.review_count)
+
+        def _sum_for(ids: list[int], index: int, cap: float) -> float:
+            total = sum(group_totals[_id][index] for _id in ids)
+            return min(total, cap)
+
+        direct_new_total = _sum_for(direct_ids, 0, new_total)
+        direct_learn_total = _sum_for(direct_ids, 1, learn_total)
+        direct_interday_total = _sum_for(direct_ids, 2, interday_total)
+        direct_review_total = _sum_for(direct_ids, 3, review_total)
+
+        child_new_nominal = sum(child_targets[_id][0] for _id in child_ids)
+        child_learn_nominal = sum(child_targets[_id][1] for _id in child_ids)
+        child_review_nominal = sum(child_targets[_id][2] for _id in child_ids)
+        child_interday_nominal = sum(child_targets[_id][3] for _id in child_ids)
+
+        def _scale(parent_total: float, direct_total: float, child_nominal: float) -> tuple[float, float]:
+            if parent_total <= 0:
+                return 0.0, 0.0
+            if direct_total >= parent_total:
+                scale_direct = parent_total / direct_total if direct_total > 0 else 0.0
+                return scale_direct, 0.0
+            remaining = parent_total - direct_total
+            if child_nominal <= 0:
+                return 1.0, 0.0
+            scale_children = min(remaining / child_nominal, 1.0)
+            return 1.0, scale_children
+
+        scale_direct_new, scale_child_new = _scale(new_total, direct_new_total, child_new_nominal)
+        scale_direct_learn, scale_child_learn = _scale(learn_total, direct_learn_total, child_learn_nominal)
+        scale_direct_interday, scale_child_interday = _scale(
+            interday_total, direct_interday_total, child_interday_nominal
+        )
+        scale_direct_review, scale_child_review = _scale(
+            review_total, direct_review_total, child_review_nominal
+        )
+
+        if self.debug:
+            self._log(
+                f"[deck] {deck_name} aggregate totals new={new_total} learn={learn_total} "
+                f"review={review_total} interday={interday_total} from {len(grouped)} groups"
+            )
+            self._log(
+                f"[deck] {deck_name} scaling direct(new={scale_direct_new:.3f}, "
+                f"learn={scale_direct_learn:.3f}, interday={scale_direct_interday:.3f}, "
+                f"review={scale_direct_review:.3f}) children(new={scale_child_new:.3f}, "
+                f"learn={scale_child_learn:.3f}, interday={scale_child_interday:.3f}, "
+                f"review={scale_child_review:.3f})"
+            )
+
+        for owner_id, items in grouped.items():
+            totals = group_totals[owner_id]
+            total_new_capacity, total_learn, total_interday, total_review_capacity = totals
+
+            if owner_id in child_targets:
+                target_new_nominal, target_learn_nominal, target_review_nominal, target_interday_nominal = (
+                    child_targets[owner_id]
+                )
+                target_new = target_new_nominal * scale_child_new
+                target_learn = target_learn_nominal * scale_child_learn
+                target_review = target_review_nominal * scale_child_review
+                target_interday = target_interday_nominal * scale_child_interday
+            else:
+                target_new = total_new_capacity * scale_direct_new
+                target_learn = total_learn * scale_direct_learn
+                target_interday = total_interday * scale_direct_interday
+                target_review = total_review_capacity * scale_direct_review
+
+            new_ratio = target_new / total_new_capacity if total_new_capacity else 0.0
+            learn_ratio = target_learn / total_learn if total_learn else 0.0
+            interday_ratio = target_interday / total_interday if total_interday else 0.0
+            review_ratio = target_review / total_review_capacity if total_review_capacity else 0.0
+
+            new_ratio = min(new_ratio, 1.0) if new_ratio else 0.0
+            learn_ratio = min(learn_ratio, 1.0) if learn_ratio else 0.0
+            interday_ratio = min(interday_ratio, 1.0) if interday_ratio else 0.0
+            review_ratio = min(review_ratio, 1.0) if review_ratio else 0.0
 
             if self.debug:
                 self._log(
-                    f"[deck] {deck_name} contribution {contrib.name}: "
-                    f"alloc new={new_alloc:.2f} review={review_alloc:.2f} "
-                    f"learn={learn_alloc:.2f} interday={interday_alloc:.2f}"
+                    f"[deck] {deck_name} group {owner_id}: "
+                    f"targets new={target_new:.2f} learn={target_learn:.2f} "
+                    f"review={target_review:.2f} interday={target_interday:.2f} "
+                    f"ratios new={new_ratio:.3f} learn={learn_ratio:.3f} "
+                    f"review={review_ratio:.3f} interday={interday_ratio:.3f}"
                 )
+
+            for contrib in items:
+                new_alloc = contrib.new_capacity * new_ratio
+                review_alloc = contrib.review_capacity * review_ratio
+                learn_alloc = contrib.learn_count * learn_ratio
+                interday_alloc = contrib.interday_count * interday_ratio
+
+                new_time += new_alloc * contrib.new_exposure_per_card * contrib.avg_new_seconds
+                learn_time += (learn_alloc + interday_alloc) * contrib.avg_new_seconds
+                review_time += (
+                    review_alloc
+                    * contrib.review_exposure_per_card
+                    * contrib.avg_review_seconds
+                )
+
+                if self.debug:
+                    self._log(
+                        f"[deck] {deck_name} contribution {contrib.name}: "
+                        f"alloc new={new_alloc:.2f} review={review_alloc:.2f} "
+                        f"learn={learn_alloc:.2f} interday={interday_alloc:.2f}"
+                    )
 
         total = new_time + learn_time + review_time
         if self.debug:
