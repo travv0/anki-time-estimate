@@ -54,10 +54,13 @@ def _deck_browser_stats(deck_browser: DeckBrowser, content) -> None:
         print(f'[FSRS time estimate] deck browser error: {err!r}')
         return
     formatted_total = format_seconds(max(result.total_seconds, 0.0))
+    formatted_new = format_seconds(max(result.new_seconds, 0.0))
+    formatted_learn = format_seconds(max(result.learn_seconds, 0.0))
     formatted_review = format_seconds(max(result.review_seconds, 0.0))
     label = (
         "<div class='fsrs-time-estimate'>"
-        f"FSRS workload across decks: {formatted_total} (reviews: {formatted_review})"
+        f"FSRS workload across decks: {formatted_total} "
+        f"(new: {formatted_new}, learn: {formatted_learn}, review: {formatted_review})"
         "</div>"
     )
     content.stats = label + (content.stats or "")
@@ -78,10 +81,13 @@ def _overview_stats(overview: Overview, content) -> None:
         result = estimator.estimate_for_deck(deck_id)
         if result is not None:
             formatted_total = format_seconds(max(result.total_seconds, 0.0))
+            formatted_new = format_seconds(max(result.new_seconds, 0.0))
+            formatted_learn = format_seconds(max(result.learn_seconds, 0.0))
             formatted_review = format_seconds(max(result.review_seconds, 0.0))
             snippet = (
                 "<div class='fsrs-time-estimate'>"
-                f"FSRS workload for this deck: {formatted_total} (reviews: {formatted_review})"
+                f"FSRS workload for this deck: {formatted_total} "
+                f"(new: {formatted_new}, learn: {formatted_learn}, review: {formatted_review})"
                 "</div>"
             )
             content.table = (content.table or "") + snippet

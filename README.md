@@ -5,7 +5,8 @@ FSRS-based study time estimates:
 
 - **Total workload** combines the expected time for all new, learning,
   interday learning, and review cards that can appear today.
-- **Review-only workload** shows the subset for scheduled reviews.
+- **Per-queue breakdown** shows the time for new, learning/relearning (the
+  red deck counter), and review queues.
 - Estimates respect each deck's FSRS preset, deck options (including
   "ignore reviews before"), and the actual counts Anki places in the
   parent's queues.
