@@ -71,6 +71,19 @@ class EstimateResult:
     review_seconds: float
 
 
+def _zero_estimate() -> EstimateResult:
+    return EstimateResult(0.0, 0.0, 0.0, 0.0)
+
+
+def _add_estimates(first: EstimateResult, second: EstimateResult) -> EstimateResult:
+    return EstimateResult(
+        total_seconds=first.total_seconds + second.total_seconds,
+        new_seconds=first.new_seconds + second.new_seconds,
+        learn_seconds=first.learn_seconds + second.learn_seconds,
+        review_seconds=first.review_seconds + second.review_seconds,
+    )
+
+
 class FsrsTimeEstimator:
     """Estimate daily workload durations using FSRS configuration and history."""
 
@@ -107,40 +120,27 @@ class FsrsTimeEstimator:
 
     def estimate_for_all_decks(self) -> EstimateResult:
         tree = self.col.sched.deck_due_tree()
-        total_seconds = 0.0
-        new_total = 0.0
-        learn_total = 0.0
-        review_total = 0.0
+        totals = _zero_estimate()
         self._log("[all decks] starting aggregation")
         for child in tree.children:
-            child_name = self._deck_name(child, child.deck_id)
-            self._log(f"[all decks] processing {child_name} ({int(child.deck_id)})")
-            result = self.estimate_for_deck(child.deck_id)
-            if result:
-                self._log(
-                    f"[all decks] deck {child_name} => {result.total_seconds:.2f}s "
-                    f"(new {result.new_seconds:.2f}s, learn {result.learn_seconds:.2f}s, "
-                    f"review {result.review_seconds:.2f}s)"
-                )
-                total_seconds += result.total_seconds
-                new_total += result.new_seconds
-                learn_total += result.learn_seconds
-                review_total += result.review_seconds
-            else:
-                self._log(f"[all decks] deck {child_name} => None")
+            child_id = DeckId(child.deck_id)
+            child_name = self._deck_name(child, child_id)
+            self._log(f"[all decks] processing {child_name} ({int(child_id)})")
+            result = self.estimate_for_deck_node(child)
+            totals = _add_estimates(totals, result)
         self._log(
-            f"[all decks] totals: total {total_seconds:.2f}s (new {new_total:.2f}s, "
-            f"learn {learn_total:.2f}s, review {review_total:.2f}s)"
+            f"[all decks] totals: total {totals.total_seconds:.2f}s "
+            f"(new {totals.new_seconds:.2f}s, learn {totals.learn_seconds:.2f}s, "
+            f"review {totals.review_seconds:.2f}s)"
         )
-        return EstimateResult(
-            total_seconds=total_seconds,
-            new_seconds=new_total,
-            learn_seconds=learn_total,
-            review_seconds=review_total,
-        )
+        return totals
 
-    def estimate_for_deck(self, deck_id: DeckId) -> EstimateResult | None:
+    def estimate_for_deck(self, deck_id: DeckId) -> EstimateResult:
         deck_node = self.col.sched.deck_due_tree(deck_id)
+        return self.estimate_for_deck_node(deck_node)
+
+    def estimate_for_deck_node(self, deck_node) -> EstimateResult:
+        deck_id = DeckId(deck_node.deck_id)
         deck_name = self._deck_name(deck_node, deck_id)
         self._log(
             f"[deck] {deck_name} ({int(deck_id)}) counts new={deck_node.new_count} "
@@ -150,12 +150,7 @@ class FsrsTimeEstimator:
         total_due = deck_node.new_count + deck_node.learn_count + deck_node.review_count
         if total_due == 0:
             self._log(f"[deck] {deck_name} has no due cards; returning 0")
-            return EstimateResult(
-                total_seconds=0.0,
-                new_seconds=0.0,
-                learn_seconds=0.0,
-                review_seconds=0.0,
-            )
+            return _zero_estimate()
 
         contributions = self._collect_contributions(deck_node)
         new_time, learn_time, review_time = self._aggregate_contributions(
